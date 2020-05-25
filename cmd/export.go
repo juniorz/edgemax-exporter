@@ -72,25 +72,6 @@ func buildTLSConfig(skipVerify bool, caPath string) (*tls.Config, error) {
 	}, err
 }
 
-func buildRegistryFor(c prometheus.Collector) prometheus.Gatherer {
-	// Since we are dealing with custom Collector implementations, it might
-	// be a good idea to try it out with a pedantic registry.
-	reg := prometheus.NewPedanticRegistry()
-
-	// Wrap with edgemax host
-	prometheus.WrapRegistererWith(
-		prometheus.Labels{"edgemax_host": configHost}, reg,
-	).MustRegister(c)
-
-	// Add the standard process and Go metrics to the custom registry.
-	reg.MustRegister(
-		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
-		prometheus.NewGoCollector(),
-	)
-
-	return reg
-}
-
 func readConfigFromEnv() {
 	if host, ok := os.LookupEnv("EDGEMAX_HOST"); ok {
 		configHost = host
@@ -114,12 +95,9 @@ func readConfigFromEnv() {
 }
 
 func buildHTTPServer(handler http.Handler) (*http.Server, <-chan struct{}) {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", handler)
-
 	srv := &http.Server{
 		Addr:    ":9745",
-		Handler: mux,
+		Handler: handler,
 	}
 
 	serverTerminated := make(chan struct{})
@@ -140,6 +118,37 @@ func buildHTTPServer(handler http.Handler) (*http.Server, <-chan struct{}) {
 	return srv, serverTerminated
 }
 
+func buildRegistryFor(c prometheus.Collector) prometheus.Gatherer {
+	// Since we are dealing with custom Collector implementations, it might
+	// be a good idea to try it out with a pedantic registry.
+	reg := prometheus.NewPedanticRegistry()
+
+	// Wrap with edgemax host
+	prometheus.WrapRegistererWith(
+		prometheus.Labels{"edgemax_host": configHost}, reg,
+	).MustRegister(c)
+
+	// Add the standard process and Go metrics to the custom registry.
+	reg.MustRegister(
+		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+		prometheus.NewGoCollector(),
+	)
+
+	return reg
+}
+
+func buildHandler(c *api.Client) http.Handler {
+	metricsHandler := promhttp.HandlerFor(buildRegistryFor(collector.New(c)), promhttp.HandlerOpts{})
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metricsHandler)
+	mux.HandleFunc("/healthz", func(resp http.ResponseWriter, req *http.Request) {
+		//TODO
+	})
+
+	return mux
+}
+
 func Execute() {
 	readConfigFromEnv()
 
@@ -148,7 +157,10 @@ func Execute() {
 		log.Fatalf("error: %s", err)
 	}
 
-	c := collector.New(&api.Client{
+	// TODO:
+	// 1. Debug mode
+
+	mux := buildHandler(&api.Client{
 		Host:     configHost,
 		Username: configUser,
 		Password: configPassword,
@@ -156,11 +168,7 @@ func Execute() {
 		TLSConfig: tlsConfig,
 	})
 
-	// TODO:
-	// 1. Debug mode
-
-	handler := promhttp.HandlerFor(buildRegistryFor(c), promhttp.HandlerOpts{})
-	srv, done := buildHTTPServer(handler)
+	srv, done := buildHTTPServer(mux)
 
 	log.Printf("Listening on %s\n", srv.Addr)
 

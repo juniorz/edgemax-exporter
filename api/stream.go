@@ -72,7 +72,7 @@ func (s *messageStream) Close() error {
 		return err
 	}
 
-	// Should it wait?
+	// TODO: Should it give the websocket a close deadline and wait?
 
 	return s.c.Close()
 }
@@ -141,56 +141,42 @@ func (s *messageStream) Bytes() ([]byte, error) {
 	return s.Bytes()
 }
 
-func (s *messageStream) parseLoop(resC chan<- interface{}) error {
-	for {
-		resp := make(map[string]json.RawMessage)
-		err := s.ReadJSON(&resp)
-		if err != nil {
-			return err
-		}
+func (s *messageStream) receiveNext(C chan<- interface{}) error {
+	resp := make(map[string]json.RawMessage)
+	if err := s.ReadJSON(&resp); err != nil {
+		return err
+	}
 
-		//TODO: Parse and dispatch
-		for k, v := range resp {
-			switch k {
-			case "interfaces":
-				r := interfaceStatResp{}
-				if err := json.Unmarshal(v, &r); err != nil {
-					return err
-				}
-
-				go func() {
-					for _, stat := range r {
-						resC <- stat
-					}
-				}()
-			case "system-stats":
-				r := &SystemStat{}
-				if err := json.Unmarshal(v, r); err != nil {
-					return err
-				}
-
-				resC <- r
-			default:
-				continue
-				// case "export":
-				// case "discover":
-				// case "pon-stats":
-				// case "num-routes":
-				// case "config-change":
-				// case "users":
+	//TODO: Parse and dispatch
+	for k, v := range resp {
+		switch k {
+		case "interfaces":
+			r := interfaceStatResp{}
+			if err := json.Unmarshal(v, &r); err != nil {
+				return err
 			}
+
+			for _, stat := range r {
+				C <- stat
+			}
+		case "system-stats":
+			r := &SystemStat{}
+			if err := json.Unmarshal(v, r); err != nil {
+				return err
+			}
+
+			C <- r
+		default:
+			// log.Printf("-> %s", v)
+			continue
+			// case "export":
+			// case "discover":
+			// case "pon-stats":
+			// case "num-routes":
+			// case "config-change":
+			// case "users":
 		}
 	}
-}
 
-func (s *messageStream) Subscribe(req subscriptionRequest) (<-chan interface{}, <-chan error, error) {
-	resC := make(chan interface{})
-	errC := make(chan error, 1)
-
-	go func() {
-		defer close(resC)
-		errC <- s.parseLoop(resC)
-	}()
-
-	return resC, errC, s.WriteJSON(req)
+	return nil
 }

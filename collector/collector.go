@@ -3,6 +3,7 @@ package collector
 import (
 	"log"
 	"sync"
+	"time"
 
 	"github.com/juniorz/edgemax-exporter/api"
 	"github.com/prometheus/client_golang/prometheus"
@@ -99,52 +100,65 @@ func New(c *api.Client) prometheus.Collector {
 		interfaceStat: make(map[string]*api.InterfaceStat, 5),
 	}
 
-	//TODO: Retry
-	go func() {
-		if err := c.Login(); err != nil {
-			log.Printf("login error: %s", err)
-			return
-		}
-
-		log.Printf("Logged in as %s\n", c.Username)
-
-		cRet, cErr, err := c.Subscribe(
-			"export",
-			"discover",
-			"pon-stats",
-			"interfaces",
-			"system-stats",
-			"num-routes",
-			"config-change",
-			"users",
-		)
-
-		if err != nil {
-			log.Printf("error: %s", err)
-			return
-		}
-
-		for msg := range cRet {
-			// log.Printf("-> %#v", msg)
-
-			ret.Lock()
-			switch m := msg.(type) {
-			case *api.SystemStat:
-				ret.SystemStat = m
-			case *api.InterfaceStat:
-				ret.interfaceStat[m.Name] = m
-			default:
-				log.Printf("-> TODO %#v", m)
-			}
-			ret.Unlock()
-		}
-
-		if err := <-cErr; err != nil {
-			log.Printf("subscription error: %s", err)
-		}
-	}()
+	go ret.poolStatsFrom(c)
 
 	return ret
+}
+
+func (c *collector) poolStatsFrom(client *api.Client) {
+	for {
+		err := c.loginAndSubscribe(client)
+		log.Printf("error: %s", err)
+
+		log.Print("Reconnecting in 5 seconds...")
+		<-time.After(5 * time.Second)
+	}
+}
+
+func (c *collector) loginAndSubscribe(client *api.Client) error {
+	if err := client.Login(); err != nil {
+		return err
+	}
+
+	log.Printf("Logged in as %s\n", client.Username)
+	defer client.Close()
+
+	subs, err := client.Subscribe(
+		"interfaces",
+		"system-stats",
+		// "export",
+		// "discover",
+		// "pon-stats",
+		// "num-routes",
+		// "config-change",
+		// "users",
+	)
+
+	if err != nil {
+		return err
+	}
+
+	defer subs.Stop()
+
+	for msg := range subs.C {
+		c.updateStats(msg)
+	}
+
+	return <-subs.Err
+}
+
+func (c *collector) updateStats(msg interface{}) {
+	c.Lock()
+	defer c.Unlock()
+
+	switch m := msg.(type) {
+	case *api.SystemStat:
+		c.SystemStat = m
+	case *api.InterfaceStat:
+		c.interfaceStat[m.Name] = m
+	default:
+		log.Printf("unknown stats: %#v", m)
+	}
 }
 
 func (c *collector) Describe(ch chan<- *prometheus.Desc) {
